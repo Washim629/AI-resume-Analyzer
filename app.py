@@ -2,6 +2,7 @@
 Smart Resume AI - Main Application
 """
 import time
+from collections import Counter
 from PIL import Image
 from jobs.job_search import render_job_search
 from datetime import datetime
@@ -37,12 +38,205 @@ import json
 import streamlit as st
 import datetime
 
-# Set page config at the very beginning
+import requests
+from collections import Counter
+import streamlit as st
+
+# MUST be first Streamlit command
 st.set_page_config(
     page_title="Smart Resume AI",
     page_icon="🚀",
     layout="wide"
 )
+
+
+def fetch_github_data(username):
+    user_url = f"https://api.github.com/users/{username}"
+    repo_url = f"https://api.github.com/users/{username}/repos"
+
+    user_resp = requests.get(user_url)
+    repo_resp = requests.get(repo_url, params={"per_page": 100})
+
+    if user_resp.status_code != 200:
+        return user_resp.json(), []
+
+    user_data = user_resp.json()
+    repo_data = repo_resp.json() if repo_resp.status_code == 200 else []
+
+    if not isinstance(repo_data, list):
+        repo_data = []
+
+    return user_data, repo_data
+
+
+def analyze_repos(repo_data):
+    total_repos = len(repo_data)
+    total_stars = sum(repo['stargazers_count'] for repo in repo_data)
+    total_forks = sum(repo['forks_count'] for repo in repo_data)
+
+    languages = [repo['language'] for repo in repo_data if repo['language']]
+    lang_count = dict(Counter(languages))
+
+    active_repos = sum(1 for repo in repo_data if not repo['archived'])
+
+    return {
+        "total_repos": total_repos,
+        "stars": total_stars,
+        "forks": total_forks,
+        "languages": lang_count,
+        "active_repos": active_repos
+    }
+
+
+def calculate_score(stats, quality_stats=None):
+    score = 0
+
+    score += min(stats["total_repos"] * 2, 30)
+    score += min(stats["stars"], 20)
+    score += min(stats["active_repos"] * 2, 20)
+    score += min(len(stats["languages"]) * 5, 20)
+    
+    if quality_stats:
+        score += min(quality_stats['quality_score'], 10)
+    
+    return min(score, 100)
+
+
+def analyze_repo_quality(repo_data):
+    if not isinstance(repo_data, list):
+        repo_data = []
+
+    total = len(repo_data)
+    with_description = sum(1 for repo in repo_data if repo.get('description'))
+    with_readme = sum(1 for repo in repo_data if repo.get('has_readme', False))  # API may not provide this directly
+    active = sum(1 for repo in repo_data if not repo.get('archived', False))
+    total_stars = sum(repo.get('stargazers_count', 0) for repo in repo_data)
+    avg_stars = total_stars / total if total > 0 else 0
+
+    # Quality score based on description, readme, activity
+    quality_score = 0
+    if total > 0:
+        quality_score = (with_description / total * 5) + (active / total * 3) + min(avg_stars, 2)
+
+    return {
+        "total": total,
+        "with_description": with_description,
+        "with_readme": with_readme,
+        "active": active,
+        "avg_stars": avg_stars,
+        "quality_score": quality_score
+    }
+
+
+def analyze_activity(repo_data):
+    from datetime import datetime, timedelta, timezone
+
+    if not isinstance(repo_data, list):
+        repo_data = []
+
+    now = datetime.now(timezone.utc)
+    six_months_ago = now - timedelta(days=180)
+
+    latest_commits = []
+    recent_updates = 0
+
+    for repo in repo_data:
+        updated_at = repo.get('updated_at')
+        if updated_at:
+            try:
+                updated_date = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))
+                if updated_date.tzinfo is None:
+                    updated_date = updated_date.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+            if updated_date > six_months_ago:
+                recent_updates += 1
+            latest_commits.append(updated_date)
+
+    latest_commit = max(latest_commits) if latest_commits else None
+    latest_commit_str = latest_commit.strftime('%Y-%m-%d') if latest_commit else 'N/A'
+
+    # Consistency score based on recent activity
+    consistency_score = min(recent_updates * 2, 10)
+
+    return {
+        "latest_commit": latest_commit_str,
+        "recent_updates": recent_updates,
+        "consistency_score": consistency_score
+    }
+
+
+def categorize_projects(repo_data):
+    categories = {
+        "Web Development": [],
+        "Mobile Apps": [],
+        "Data Science/ML": [],
+        "DevOps/Tools": [],
+        "Games": [],
+        "Other": []
+    }
+
+    if not isinstance(repo_data, list):
+        repo_data = []
+
+    for repo in repo_data:
+        name = (repo.get('name') or '').lower()
+        desc = (repo.get('description') or '').lower()
+        lang = (repo.get('language') or '').lower()
+        tags = ' '.join([name, desc, lang])
+
+        if any(word in tags for word in ['web', 'frontend', 'backend', 'api', 'website', 'html', 'css', 'js', 'react', 'vue', 'django', 'flask']):
+            categories["Web Development"].append(repo.get('name', ''))
+        elif any(word in tags for word in ['mobile', 'android', 'ios', 'app', 'flutter', 'react native', 'kotlin', 'swift']):
+            categories["Mobile Apps"].append(repo.get('name', ''))
+        elif any(word in tags for word in ['ml', 'ai', 'data', 'machine learning', 'neural', 'python', 'r', 'pandas', 'numpy', 'tensorflow', 'scikit']):
+            categories["Data Science/ML"].append(repo.get('name', ''))
+        elif any(word in tags for word in ['devops', 'docker', 'kubernetes', 'ci', 'cd', 'tool', 'cli', 'terraform', 'ansible']):
+            categories["DevOps/Tools"].append(repo.get('name', ''))
+        elif any(word in tags for word in ['game', 'gaming', 'unity', 'unreal', 'puzzle']):
+            categories["Games"].append(repo.get('name', ''))
+        else:
+            categories["Other"].append(repo.get('name', ''))
+
+    return categories
+
+
+def generate_ai_suggestions(stats, quality_stats, activity_stats, categories):
+    suggestions = []
+
+    total_repos = stats.get("total_repos", 0)
+    language_count = len(stats.get("languages", {}))
+    description_ratio = quality_stats['with_description'] / quality_stats['total'] if quality_stats['total'] else 0
+
+    if total_repos == 0:
+        suggestions.append("Start by adding your first repository and complete your GitHub profile.")
+        return suggestions
+
+    if total_repos < 5:
+        suggestions.append("Create more projects to showcase your skills. Aim for at least 5-10 quality repositories.")
+
+    if description_ratio < 0.5:
+        suggestions.append("Add descriptions to your repositories. Good descriptions help others understand your projects.")
+
+    if activity_stats['recent_updates'] < 3:
+        suggestions.append("Maintain regular activity. Update your projects frequently to show ongoing development.")
+
+    if language_count < 3:
+        suggestions.append("Explore more programming languages. Diversity in your tech stack makes you more versatile.")
+
+    if quality_stats['avg_stars'] < 1 and total_repos > 0:
+        suggestions.append("Focus on creating impactful projects. Consider contributing to open source or building useful tools.")
+
+    if categories.get('Web Development') and not categories.get('Data Science/ML'):
+        suggestions.append("Consider expanding into data science or machine learning to strengthen your portfolio.")
+
+    if activity_stats['consistency_score'] < 5:
+        suggestions.append("Improve consistency by committing regularly. Set a goal of at least one commit per week.")
+
+    if not suggestions:
+        suggestions.append("Your GitHub profile looks strong. Keep refining your projects and stay consistent.")
+
+    return suggestions
 
 
 class ResumeApp:
@@ -81,7 +275,8 @@ class ResumeApp:
         self.pages = {
             "🏠 HOME": self.render_home,
             "🔍 RESUME ANALYZER": self.render_analyzer,
-            "📝 RESUME BUILDER": self.render_builder,
+            "� GITHUB ANALYZER": self.render_github_analyzer,
+            "�📝 RESUME BUILDER": self.render_builder,
             "📊 DASHBOARD": self.render_dashboard,
             "🎯 JOB SEARCH": self.render_job_search,
             "💬 FEEDBACK": self.render_feedback_page
@@ -470,27 +665,10 @@ class ResumeApp:
         col1, col2, col3 = st.columns([1, 3, 1])
         
         with col2:
-            # GitHub star button with lottie animation
-            st.markdown("""
-            <div style='display: flex; justify-content: center; align-items: center; margin-bottom: 10px;'>
-                <a href='https://github.com/Hunterdii/Smart-AI-Resume-Analyzer' target='_blank' style='text-decoration: none;'>
-                    <div style='display: flex; align-items: center; background-color: #24292e; padding: 5px 10px; border-radius: 5px; transition: all 0.3s ease;'>
-                        <svg height="16" width="16" viewBox="0 0 16 16" version="1.1" style='margin-right: 5px;'>
-                            <path fill-rule="evenodd" d="M8 .25a.75.75 0 01.673.418l1.882 3.815 4.21.612a.75.75 0 01.416 1.279l-3.046 2.97.719 4.192a.75.75 0 01-1.088.791L8 12.347l-3.766 1.98a.75.75 0 01-1.088-.79l.72-4.194L.818 6.374a.75.75 0 01.416-1.28l4.21-.611L7.327.668A.75.75 0 018 .25z" fill="gold"></path>
-                        </svg>
-                        <span style='color: white; font-size: 14px;'>Star this repo</span>
-                    </div>
-                </a>
-            </div>
-            """, unsafe_allow_html=True)
-            
             # Footer text
             st.markdown("""
             <p style='text-align: center;'>
                 Powered by <b>Streamlit</b> and <b>Google Gemini AI</b>
-            </p>
-            <p style='text-align: center; font-size: 12px; color: #888888;'>
-                "Every star counts! If you find this project helpful, please consider starring the repo to help it reach more people."
             </p>
             """, unsafe_allow_html=True)
 
@@ -543,7 +721,7 @@ class ResumeApp:
         """Render the dashboard page"""
         self.dashboard_manager.render_dashboard()
 
-        st.toast("Check out these repositories: [Awesome Hacking](https://github.com/Hunterdii/Awesome-Hacking)", icon="ℹ️")
+        # st.toast("Check out these repositories: [Awesome Hacking](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
 
 
     def render_empty_state(self, icon, message):
@@ -1048,7 +1226,7 @@ class ResumeApp:
                 st.markdown('</div>', unsafe_allow_html=True)
                 
                 # Optional: Keep a subtle toast if needed, but minimize it
-                # st.toast("Check out these repositories: [AI-Nexus(AI/ML)](https://github.com/Hunterdii/AI-Nexus)", icon="ℹ️")
+                # st.toast("Check out these repositories: [AI-Nexus(AI/ML)](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
         
         # ...existing code...        # ...existing code...
         
@@ -1203,7 +1381,7 @@ class ResumeApp:
                 st.markdown('</div>', unsafe_allow_html=True)
                 
                 # Optional: Keep a subtle toast if needed, but minimize it
-                # st.toast("Check out these repositories: [AI-Nexus(AI/ML)](https://github.com/Hunterdii/AI-Nexus)", icon="ℹ️")
+                # st.toast("Check out these repositories: [AI-Nexus(AI/ML)](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
         
         # ...existing code...
             
@@ -1305,7 +1483,7 @@ class ResumeApp:
                 print(f"Full traceback: {traceback.format_exc()}")
                 st.error(f"❌ Error preparing resume data: {str(e)}")
 
-        st.toast("Check out these repositories: [](https://github.com/Hunterdii/30-Days-Of-Rust)", icon="ℹ️")
+        # st.toast("Check out these repositories: [](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
 
     def render_about(self):
         """Render the about page"""
@@ -1468,14 +1646,14 @@ class ResumeApp:
         # Profile Section
         st.markdown(f"""
             <div class="profile-section">
-                <img src="{image_base64 if image_base64 else 'https://avatars.githubusercontent.com/Hunterdii'}"
+                <img src="{image_base64 if image_base64 else 'https://avatars.githubusercontent.com/Washim629'}"
                      alt="Het Patel"
                      class="profile-image"
-                     onerror="this.onerror=null; this.src='https://avatars.githubusercontent.com/Hunterdii';">
-                <h2 class="profile-name">Het Patel (Hunterdii)</h2>
+                     onerror="this.onerror=null; this.src='https://avatars.githubusercontent.com/Washim629';">
+                <h2 class="profile-name">Het Patel (Washim629)</h2>
                 <p class="profile-title">Full Stack Developer & AI/ML Enthusiast</p>
                 <div class="social-links">
-                    <a href="https://github.com/Hunterdii" class="social-link" target="_blank">
+                    <a href="https://github.com/Washim629/AI-resume-Analyzer" class="social-link" target="_blank">
                         <i class="fab fa-github"></i>
                     </a>
                     <a href="https://www.linkedin.com/in/patel-hetkumar-sandipbhai-8b110525a/" class="social-link" target="_blank">
@@ -1543,7 +1721,7 @@ class ResumeApp:
             </div>
         """, unsafe_allow_html=True)
 
-        st.toast("Check out these repositories: [Iriswise](https://github.com/Hunterdii/Iriswise)", icon="ℹ️")
+        # st.toast("Check out these repositories: [Iriswise](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
 
     def render_analyzer(self):
         """Render the resume analyzer page"""
@@ -3102,7 +3280,110 @@ class ResumeApp:
                             import traceback as tb
                             st.code(tb.format_exc())
 
-        st.toast("Check out these repositories: [Awesome Java](https://github.com/Hunterdii/Awesome-Java)", icon="ℹ️")
+        # st.toast("Check out these repositories: [Awesome Java](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
+
+
+    def render_github_analyzer(self):
+        """Render the GitHub profile analyzer page"""
+        apply_modern_styles()
+
+        # Page Header
+        page_header(
+            "GitHub Profile Analyzer",
+            "Analyze your GitHub profile to get insights and improvement suggestions"
+        )
+
+        st.markdown("---")
+        st.header("🔍 GitHub Profile Analyzer")
+
+        username = st.text_input("Enter GitHub Username")
+
+        if st.button("Analyze GitHub"):
+            user_data, repo_data = fetch_github_data(username)
+
+            if "message" in user_data:
+                st.error("User not found!")
+            else:
+                if not isinstance(repo_data, list) or len(repo_data) == 0:
+                    st.warning("No repository data available or this user has no public repos.")
+
+                # 1. Profile Overview
+                st.subheader("📊 1. Profile Overview")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.write(f"**Name:** {user_data.get('name', 'N/A')}")
+                    st.write(f"**Username:** {user_data.get('login', 'N/A')}")
+                    st.write(f"**Bio:** {user_data.get('bio', 'N/A')}")
+                    st.write(f"**Location:** {user_data.get('location', 'N/A')}")
+                with col2:
+                    st.write(f"**Followers:** {user_data.get('followers', 0)}")
+                    st.write(f"**Following:** {user_data.get('following', 0)}")
+                    st.write(f"**Public Repos:** {user_data.get('public_repos', 0)}")
+                    st.write(f"**Joined:** {user_data.get('created_at', 'N/A')[:10] if user_data.get('created_at') else 'N/A'}")
+
+                # 2. Language & Tech Stack Analysis
+                st.subheader("🧠 2. Language & Tech Stack Analysis")
+                stats = analyze_repos(repo_data)
+                if stats['languages']:
+                    st.bar_chart(stats['languages'])
+                    st.write("**Top Languages:**")
+                    for lang, count in sorted(stats['languages'].items(), key=lambda x: x[1], reverse=True)[:5]:
+                        st.write(f"- {lang}: {count} repos")
+                else:
+                    st.write("No language data available.")
+
+                # 3. Repository Quality Analysis
+                st.subheader("📁 3. Repository Quality Analysis")
+                quality_stats = analyze_repo_quality(repo_data)
+                st.write(f"**Repos with descriptions:** {quality_stats['with_description']}/{quality_stats['total']}")
+                st.write(f"**Repos with README:** {quality_stats['with_readme']}/{quality_stats['total']} (estimated)")
+                st.write(f"**Active repos:** {quality_stats['active']}")
+                st.write(f"**Average stars per repo:** {quality_stats['avg_stars']:.2f}")
+
+                # 4. Activity & Consistency Tracker
+                st.subheader("🔥 4. Activity & Consistency Tracker")
+                activity_stats = analyze_activity(repo_data)
+                st.write(f"**Most recent commit:** {activity_stats['latest_commit']}")
+                st.write(f"**Repos updated in last 6 months:** {activity_stats['recent_updates']}")
+                st.write(f"**Consistency score:** {activity_stats['consistency_score']}/10")
+
+                # 5. Project Categorization
+                st.subheader("📌 5. Project Categorization")
+                categories = categorize_projects(repo_data)
+                for cat, repos in categories.items():
+                    st.write(f"**{cat}:** {len(repos)} repos")
+                    if repos:
+                        st.write(f"Examples: {', '.join(repos[:3])}")
+
+                # 6. Skill Score / Rating System
+                st.subheader("🏆 6. Skill Score / Rating System")
+                score = calculate_score(stats, quality_stats)
+                st.success(f"**Overall Score: {score}/100**")
+
+                if score > 85:
+                    level = "Expert Developer"
+                elif score > 60:
+                    level = "Advanced Developer"
+                elif score > 40:
+                    level = "Intermediate Developer"
+                else:
+                    level = "Beginner Developer"
+
+                st.write(f"**Level:** {level}")
+
+                # Detailed breakdown
+                st.write("**Score Breakdown:**")
+                st.write(f"- Repository Count: {min(stats['total_repos'] * 2, 30)}/30")
+                st.write(f"- Stars: {min(stats['stars'], 20)}/20")
+                st.write(f"- Active Repos: {min(stats['active_repos'] * 2, 20)}/20")
+                st.write(f"- Language Diversity: {min(len(stats['languages']) * 5, 20)}/20")
+                st.write(f"- Quality: {min(quality_stats['quality_score'], 10)}/10")
+
+                # 7. AI Suggestions / Improvements
+                st.subheader("💡 7. AI Suggestions / Improvements")
+                suggestions = generate_ai_suggestions(stats, quality_stats, activity_stats, categories)
+                for s in suggestions:
+                    st.write(f"- {s}")
 
 
     def render_home(self):
@@ -3111,7 +3392,8 @@ class ResumeApp:
         # Hero Section
         hero_section(
             "Smart Resume AI",
-            "Transform your career with AI-powered resume analysis and building. Get personalized insights and create professional resumes that stand out."
+            "Transform your career with AI-powered resume analysis and building.",
+            "Analyze resumes, build polished documents, and get tailored career insights all from one intelligent platform."
         )
         
         # Features Section
@@ -3137,7 +3419,7 @@ class ResumeApp:
         
         st.markdown('</div>', unsafe_allow_html=True)
         
-        st.toast("Check out these repositories: [AI-Nexus(AI/ML)](https://github.com/Hunterdii/AI-Nexus)", icon="ℹ️")
+        # st.toast("Check out these repositories: [AI-Nexus(AI/ML)](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
 
         # Call-to-Action with Streamlit navigation
         col1, col2, col3 = st.columns([1, 1, 1])
@@ -3154,7 +3436,7 @@ class ResumeApp:
         """Render the job search page"""
         render_job_search()
 
-        st.toast("Check out these repositories: [GeeksforGeeks-POTD](https://github.com/Hunterdii/GeeksforGeeks-POTD)", icon="ℹ️")
+        # st.toast("Check out these repositories: [GeeksforGeeks-POTD](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
 
 
     def render_feedback_page(self):
@@ -3179,7 +3461,7 @@ class ResumeApp:
         with stats_tab:
             feedback_manager.render_feedback_stats()
 
-        st.toast("Check out these repositories: [TryHackMe Free Rooms](https://github.com/Hunterdii/tryhackme-free-rooms)", icon="ℹ️")
+        # st.toast("Check out these repositories: [TryHackMe Free Rooms](https://github.com/Washim629/AI-resume-Analyzer", icon="ℹ️")
 
 
     def show_repo_notification(self):
@@ -3188,22 +3470,22 @@ class ResumeApp:
     <div style="margin-bottom: 10px;">Check out these other repositories:</div>
     <div style="margin-bottom: 5px;"><b>Hacking Resources:</b></div>
     <ul style="margin-top: 0; padding-left: 20px;">
-        <li><a href="https://github.com/Hunterdii/tryhackme-free-rooms" target="_blank" style="color: #4CAF50;">TryHackMe Free Rooms</a></li>
-        <li><a href="https://github.com/Hunterdii/Awesome-Hacking" target="_blank" style="color: #4CAF50;">Awesome Hacking</a></li>
+        <!-- <li><a href="https://github.com/Washim629/AI-resume-Analyzer" target="_blank" style="color: #4CAF50;">TryHackMe Free Rooms</a></li> -->
+        <!-- <li><a href="https://github.com/Washim629/AI-resume-Analyzer" target="_blank" style="color: #4CAF50;">Awesome Hacking</a></li> -->
     </ul>
     <div style="margin-bottom: 5px;"><b>Programming Languages:</b></div>
     <ul style="margin-top: 0; padding-left: 20px;">
-        <li><a href="https://github.com/Hunterdii/Awesome-Java" target="_blank" style="color: #4CAF50;">Awesome Java</a></li>
-        <li><a href="https://github.com/Hunterdii/30-Days-Of-Rust" target="_blank" style="color: #4CAF50;">30 Days Of Rust</a></li>
+        <!-- <li><a href="https://github.com/Washim629/AI-resume-Analyzer" target="_blank" style="color: #4CAF50;">Awesome Java</a></li> -->
+        <!-- <li><a href="https://github.com/Washim629/AI-resume-Analyzer" target="_blank" style="color: #4CAF50;">30 Days Of Rust</a></li> -->
     </ul>
     <div style="margin-bottom: 5px;"><b>Data Structures & Algorithms:</b></div>
     <ul style="margin-top: 0; padding-left: 20px;">
-        <li><a href="https://github.com/Hunterdii/GeeksforGeeks-POTD" target="_blank" style="color: #4CAF50;">GeeksforGeeks POTD</a></li>
-        <li><a href="https://github.com/Hunterdii/Leetcode-POTD" target="_blank" style="color: #4CAF50;">Leetcode POTD</a></li>
+        <!-- <li><a href="https://github.com/Washim629/AI-resume-Analyzer" target="_blank" style="color: #4CAF50;">GeeksforGeeks POTD</a></li> -->
+        <!-- <li><a href="https://github.com/Washim629/AI-resume-Analyzer" target="_blank" style="color: #4CAF50;">Leetcode POTD</a></li> -->
     </ul>
     <div style="margin-bottom: 5px;"><b>AI/ML Projects:</b></div>
     <ul style="margin-top: 0; padding-left: 20px;">
-        <li><a href="https://github.com/Hunterdii/AI-Nexus" target="_blank" style="color: #4CAF50;">AI Nexus</a></li>
+        <!-- <li><a href="https://github.com/Washim629/AI-resume-Analyzer" target="_blank" style="color: #4CAF50;">AI Nexus</a></li> -->
     </ul>
     <div style="margin-top: 10px;">If you find this project helpful, please consider ⭐ starring the repo!</div>
 </div>
@@ -3217,10 +3499,21 @@ class ResumeApp:
         
         # Admin login/logout in sidebar
         with st.sidebar:
-            st_lottie(self.load_lottie_url("https://assets5.lottiefiles.com/packages/lf20_xyadoh9h.json"), height=200, key="sidebar_animation")
-            st.title("Smart Resume AI")
+            st.markdown(
+                """
+                <div class='sidebar-brand'>
+                    <div class='sidebar-logo'>🚀</div>
+                    <div class='sidebar-brand-text'>
+                        <h2>Smart Resume AI</h2>
+                        <p>One hub for resumes, GitHub & job search</p>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
             st.markdown("---")
-            
+            st.markdown("<div class='sidebar-nav-title'>Navigation</div>", unsafe_allow_html=True)
+
             # Navigation buttons
             for page_name in self.pages.keys():
                 if st.button(page_name, use_container_width=True):
@@ -3228,8 +3521,8 @@ class ResumeApp:
                     st.session_state.page = cleaned_name
                     st.rerun()
 
-            # Add some space before admin login
-            st.markdown("<br><br>", unsafe_allow_html=True)
+            active_page = st.session_state.get('page', 'home').replace('_', ' ').title()
+            st.markdown(f"<div class='sidebar-active'>Current: {active_page}</div>", unsafe_allow_html=True)
             st.markdown("---")
 
             # Admin Login/Logout section at bottom

@@ -1,7 +1,7 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
-import google.generativeai as genai
+import google.genai as genai
 import pdfplumber
 from pdf2image import convert_from_path
 import pytesseract
@@ -21,8 +21,11 @@ class AIResumeAnalyzer:
         self.google_api_key = os.getenv("GOOGLE_API_KEY")
         self.openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
         
+        # Initialize the client if API key is available
         if self.google_api_key:
-            genai.configure(api_key=self.google_api_key)
+            self.client = genai.Client(api_key=self.google_api_key)
+        else:
+            self.client = None
     
     def extract_text_from_pdf(self, pdf_file):
         """Extract text from PDF using pdfplumber and OCR if needed"""
@@ -181,7 +184,120 @@ class AIResumeAnalyzer:
         os.unlink(temp_path)  # Clean up the temp file
         return text
     
-    def analyze_resume_with_gemini(self, resume_text, job_description=None, job_role=None):
+    def analyze_resume_with_openrouter(self, resume_text, job_description=None, job_role=None):
+        """Analyze resume using OpenRouter API (alternative to Google Gemini)"""
+        if not resume_text:
+            return {"error": "Resume text is required for analysis."}
+        
+        if not self.openrouter_api_key:
+            return {"error": "OpenRouter API key is not configured. Please add it to your .env file."}
+        
+        try:
+            base_prompt = f"""
+            You are an expert resume analyst with deep knowledge of industry standards, job requirements, and hiring practices across various fields. Your task is to provide a comprehensive, detailed analysis of the resume provided.
+            
+            Please structure your response in the following format:
+            
+            ## Overall Assessment
+            [Provide a detailed assessment of the resume's overall quality, effectiveness, and alignment with industry standards. Include specific observations about formatting, content organization, and general impression. Be thorough and specific.]
+            
+            ## Professional Profile Analysis
+            [Analyze the candidate's professional profile, experience trajectory, and career narrative. Discuss how well their story comes across and whether their career progression makes sense for their apparent goals.]
+            
+            ## Skills Analysis
+            - **Current Skills**: [List ALL skills the candidate demonstrates in their resume, categorized by type (technical, soft, domain-specific, etc.). Be comprehensive.]
+            - **Skill Proficiency**: [Assess the apparent level of expertise in key skills based on how they're presented in the resume]
+            - **Missing Skills**: [List important skills that would improve the resume for their target role. Be specific and explain why each skill matters.]
+            
+            ## Experience Analysis
+            [Provide detailed feedback on how well the candidate has presented their experience. Analyze the use of action verbs, quantifiable achievements, and relevance to their target role. Suggest specific improvements.]
+            
+            ## Education Analysis
+            [Analyze the education section, including relevance of degrees, certifications, and any missing educational elements that would strengthen their profile.]
+            
+            ## Key Strengths
+            [List 5-7 specific strengths of the resume with detailed explanations of why these are effective]
+            
+            ## Areas for Improvement
+            [List 5-7 specific areas where the resume could be improved with detailed, actionable recommendations]
+            
+            ## ATS Optimization Assessment
+            [Analyze how well the resume is optimized for Applicant Tracking Systems. Provide a specific ATS score from 0-100, with 100 being perfectly optimized. Use this format: "ATS Score: XX/100". Then suggest specific keywords and formatting changes to improve ATS performance.]
+            
+            ## Recommended Courses/Certifications
+            [Suggest 5-7 specific courses or certifications that would enhance the candidate's profile, with a brief explanation of why each would be valuable]
+            
+            ## Resume Score
+            [Provide a score from 0-100 based on the overall quality of the resume. Use this format exactly: "Resume Score: XX/100" where XX is the numerical score. Be consistent with your assessment - a resume with significant issues should score below 60, an average resume 60-75, a good resume 75-85, and an excellent resume 85-100.]
+            
+            Resume:
+            {resume_text}
+            """
+            
+            if job_role:
+                base_prompt += f"""
+                
+                The candidate is targeting a role as: {job_role}
+                
+                ## Role Alignment Analysis
+                [Analyze how well the resume aligns with the target role of {job_role}. Provide specific recommendations to better align the resume with this role.]
+                """
+            
+            if job_description:
+                base_prompt += f"""
+                
+                Additionally, compare this resume to the following job description:
+                
+                Job Description:
+                {job_description}
+                
+                ## Job Match Analysis
+                [Provide a detailed analysis of how well the resume matches the job description, with a match percentage and specific areas of alignment and misalignment]
+                
+                ## Key Job Requirements Not Met
+                [List specific requirements from the job description that are not addressed in the resume, with recommendations on how to address each gap]
+                """
+            
+            # Use OpenRouter API
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {self.openrouter_api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            data = {
+                "model": "anthropic/claude-3-haiku:beta",  # Using Claude Haiku as it's cost-effective
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": base_prompt
+                    }
+                ],
+                "max_tokens": 4000,
+                "temperature": 0.7
+            }
+            
+            response = requests.post(url, headers=headers, json=data)
+            response.raise_for_status()
+            
+            result = response.json()
+            analysis = result["choices"][0]["message"]["content"].strip()
+            
+            # Extract resume score if present
+            resume_score = self._extract_score_from_text(analysis)
+            
+            # Extract ATS score if present
+            ats_score = self._extract_ats_score_from_text(analysis)
+            
+            return {
+                "analysis": analysis,
+                "resume_score": resume_score,
+                "ats_score": ats_score,
+                "model_used": "Claude-3-Haiku (via OpenRouter)"
+            }
+        
+        except Exception as e:
+            return {"error": f"Analysis failed: {str(e)}"}
         """Analyze resume using Google Gemini AI"""
         if not resume_text:
             return {"error": "Resume text is required for analysis."}
@@ -258,6 +374,104 @@ class AIResumeAnalyzer:
                 """
             
             response = model.generate_content(base_prompt)
+            analysis = response.text.strip()
+            
+            # Extract resume score if present
+            resume_score = self._extract_score_from_text(analysis)
+            
+            # Extract ATS score if present
+            ats_score = self._extract_ats_score_from_text(analysis)
+            
+            return {
+                "analysis": analysis,
+                "resume_score": resume_score,
+                "ats_score": ats_score
+            }
+        
+        except Exception as e:
+            return {"error": f"Analysis failed: {str(e)}"}
+
+    
+    def analyze_resume_with_gemini(self, resume_text, job_description=None, job_role=None):
+        """Analyze resume using Google Gemini AI"""
+        if not resume_text:
+            return {"error": "Resume text is required for analysis."}
+        
+        if not self.client:
+            return {"error": "Google API key is not configured. Please add it to your .env file."}
+        
+        try:
+            base_prompt = f"""
+            You are an expert resume analyst with deep knowledge of industry standards, job requirements, and hiring practices across various fields. Your task is to provide a comprehensive, detailed analysis of the resume provided.
+            
+            Please structure your response in the following format:
+            
+            ## Overall Assessment
+            [Provide a detailed assessment of the resume's overall quality, effectiveness, and alignment with industry standards. Include specific observations about formatting, content organization, and general impression. Be thorough and specific.]
+            
+            ## Professional Profile Analysis
+            [Analyze the candidate's professional profile, experience trajectory, and career narrative. Discuss how well their story comes across and whether their career progression makes sense for their apparent goals.]
+            
+            ## Skills Analysis
+            - **Current Skills**: [List ALL skills the candidate demonstrates in their resume, categorized by type (technical, soft, domain-specific, etc.). Be comprehensive.]
+            - **Skill Proficiency**: [Assess the apparent level of expertise in key skills based on how they're presented in the resume]
+            - **Missing Skills**: [List important skills that would improve the resume for their target role. Be specific and explain why each skill matters.]
+            
+            ## Experience Analysis
+            [Provide detailed feedback on how well the candidate has presented their experience. Analyze the use of action verbs, quantifiable achievements, and relevance to their target role. Suggest specific improvements.]
+            
+            ## Education Analysis
+            [Analyze the education section, including relevance of degrees, certifications, and any missing educational elements that would strengthen their profile.]
+            
+            ## Key Strengths
+            [List 5-7 specific strengths of the resume with detailed explanations of why these are effective]
+            
+            ## Areas for Improvement
+            [List 5-7 specific areas where the resume could be improved with detailed, actionable recommendations]
+            
+            ## ATS Optimization Assessment
+            [Analyze how well the resume is optimized for Applicant Tracking Systems. Provide a specific ATS score from 0-100, with 100 being perfectly optimized. Use this format: "ATS Score: XX/100". Then suggest specific keywords and formatting changes to improve ATS performance.]
+            
+            ## Recommended Courses/Certifications
+            [Suggest 5-7 specific courses or certifications that would enhance the candidate's profile, with a brief explanation of why each would be valuable]
+            
+            ## Resume Score
+            [Provide a score from 0-100 based on the overall quality of the resume. Use this format exactly: "Resume Score: XX/100" where XX is the numerical score. Be consistent with your assessment - a resume with significant issues should score below 60, an average resume 60-75, a good resume 75-85, and an excellent resume 85-100.]
+            
+            Resume:
+            {resume_text}
+            """
+            
+            if job_role:
+                base_prompt += f"""
+                
+                The candidate is targeting a role as: {job_role}
+                
+                ## Role Alignment Analysis
+                [Analyze how well the resume aligns with the target role of {job_role}. Provide specific recommendations to better align the resume with this role.]
+                """
+            
+            if job_description:
+                base_prompt += f"""
+                
+                Additionally, compare this resume to the following job description:
+                
+                Job Description:
+                {job_description}
+                
+                ## Job Match Analysis
+                [Provide a detailed analysis of how well the resume matches the job description, with a match percentage and specific areas of alignment and misalignment]
+                
+                ## Key Job Requirements Not Met
+                [List specific requirements from the job description that are not addressed in the resume, with recommendations on how to address each gap]
+                """
+            
+            # Use the new Google GenAI API
+            response = self.client.models.generate_content(
+                model="gemini-2.0-flash-exp",
+                contents=base_prompt
+            )
+            
             analysis = response.text.strip()
             
             # Extract resume score if present
