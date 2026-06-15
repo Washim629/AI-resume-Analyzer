@@ -1,7 +1,7 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
-import google.genai as genai
+import google.generativeai as genai
 import pdfplumber
 from pdf2image import convert_from_path
 import pytesseract

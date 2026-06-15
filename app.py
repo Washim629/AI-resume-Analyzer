@@ -1,6 +1,7 @@
 ﻿"""
 Smart Resume AI - Main Application
 """
+import re
 import time
 from collections import Counter
 from PIL import Image
@@ -748,9 +749,9 @@ class ResumeApp:
             try:
                 # Extract text from resume
                 if uploaded_file.type == "application/pdf":
-                    resume_text = extract_text_from_pdf(uploaded_file)
+                    resume_text = self.analyzer.extract_text_from_pdf(uploaded_file)
                 else:
-                    resume_text = extract_text_from_docx(uploaded_file)
+                    resume_text = self.analyzer.extract_text_from_docx(uploaded_file)
 
                 # Store resume data
                 st.session_state.resume_data = {
